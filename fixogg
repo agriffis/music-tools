@@ -1,0 +1,113 @@
+#!/bin/bash
+
+getvars() {
+    declare x=$1
+    declare vars
+
+    case "$x" in
+        *.flac)
+            if ! vars=$(metaflac --export-tags-to=- "$x"); then
+                echo "Failed to collect metaflac from $x" >&2
+                return 1
+            fi
+            perl -pe 's/^.*?(?==)/lc($&)/e' <<<"$vars" | sort
+            return 0
+            ;;
+
+        *)
+            if ! vars=$(vorbiscomment -l "$x"); then
+                echo "Failed to collect vorbiscomment from $x" >&2
+                return 1
+            fi
+            sort <<<"$vars"
+            return 0
+            ;;
+    esac
+
+    return 2
+}
+
+putvars() {
+    declare x=$1
+    declare vars=$2
+
+    case $x in
+        *.flac)
+            metaflac --remove-all-tags --import-tags-from=- "$x" <<<"$vars"
+            return $?
+            ;;
+
+        *)
+            vorbiscomment -w "$x" "$x.new" <<<"$vars" && mv "$x.new" "$x"
+            return $?
+            ;;
+    esac
+
+    return 2
+}
+
+# modifies variables in caller scope
+parsename() {
+    declare x=$1
+
+    # Parse the filename
+    case "${x%.*}" in
+        *\ -\ *:\ [0-9]\ *|*\ -\ *:\ [0-9][0-9]\ *|*\ -\ *:\ [0-9][0-9][0-9]\ *)
+            artist=${x%% - *}
+            album=${x#* - }; album=${album%%: [0-9]*}
+            tracknumber=${x#$artist - $album: }; tracknumber=${tracknumber%% *}
+            title=${x#$artist - $album: $tracknumber }; title=${title%.*}
+            ;;
+
+        *:\ [0-9]\ *|*:\ [0-9][0-9]\ *|*:\ [0-9][0-9][0-9]\ *)
+            artist=${x%%: [0-9]*}
+            tracknumber=${x#$artist: }; tracknumber=${tracknumber%% *}
+            title=${x#$artist: $tracknumber }; title=${title%.*}
+            album=''
+            ;;
+
+        *:\ *)
+            artist=${x%%: *}
+            title=${x#$artist: }; title=${title%.*}
+            album=''; tracknumber=''
+            ;;
+
+        *)
+            echo "Can't parse $x" >&2
+            return 1
+            ;;
+    esac
+}
+
+for x in "$@"; do
+    # Collect the tags from the existing file
+    vars=$(getvars "$x") || continue
+    oldvars=$vars # for diffing
+    unset album artist comment date genre title tracknumber
+    unset ALBUM ARTIST COMMENT DATE GENRE TITLE TRACKNUMBER
+    if [[ -n $vars ]]; then
+        vars=$(sed "s/[[:space:]]*\$//; s/'/'\\\\''/g; s/=/='/; s/\$/'/" <<<"$vars")
+        if ! eval "$vars"; then
+            echo "Failed to eval vars for $x" >&2
+            continue
+        fi
+    fi
+
+    parsename "$x" || continue
+
+    # Write the new comments
+    echo
+    echo "<<< ${x##*/} >>>"
+    vars=$(for v in album artist comment date genre title tracknumber; do
+        uv=$(tr a-z A-Z <<<"$v")
+        eval $v=\${$v-\$$uv}
+        [[ -n "${!v}" ]] && echo "$v=${!v}"
+    done)
+    putvars "$x" "$vars" || continue
+
+    # Diff it!
+    newvars=$(getvars "$x")
+    diff <(echo "$oldvars") <(echo "$newvars")
+done
+
+exit 0
